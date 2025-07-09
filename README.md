@@ -133,6 +133,10 @@ npm test            # 默认测试 office-cisco-3750 & show version
 npx tsx scripts/test-office.ts ./cisco-devices.json office-cisco-3750
 ```
 
+目前已经在Cisco 3750 上测试通过，其他设备未测试。
+
+npm test的验证方式是硬编码，未来可以考虑优化。
+
 ---
 ## 6. FAQ / 常见问题
 
