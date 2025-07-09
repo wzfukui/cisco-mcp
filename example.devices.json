@@ -1,0 +1,9 @@
+[
+  {
+    "alias": "office-cisco-3750",
+    "host": "192.168.1.11",
+    "username": "cisco",
+    "password": "********",
+    "protocol": "telnet"
+  }
+] 

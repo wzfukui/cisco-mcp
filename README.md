@@ -1,270 +1,152 @@
-# Cisco MCP Server
+# Cisco MCP Server (v2)
 
-[English](#english) | [中文](#中文)
+![Node](https://img.shields.io/badge/node-%3E%3D16.0-brightgreen) ![TypeScript](https://img.shields.io/badge/built%20with-typescript-blue)
+
+一个针对 **Cisco 路由器 / 交换机 / 防火墙** 的 MCP（Model Context Protocol）服务器，可让 ChatGPT、Claude、Amazon Q 等 AI 助手通过 **工具调用** 方式执行命令并进行网络自动化。
+
+> v2 版本特性：
+> 1. **设备配置文件** —— 通过 JSON 数组集中管理多台设备，使用 `deviceAlias` 唯一标识。
+> 2. **自动建连** —— 调用 `execute_cisco_command` 时若未连接，将自动读取配置并建立 Telnet / SSH 长连接。
+> 3. **分页关闭** —— 启动后自动执行 `terminal length 0`，避免 `--More--` 输出停顿。
+> 4. **改进的工具集** —— 共 5 个工具：`list_available_devices`、`connect_cisco_device`、`execute_cisco_command`、`disconnect_cisco_device`、`list_connections`。
 
 ---
+## 目录
+1. 快速开始
+2. 设备配置文件格式
+3. 工具一览 & 调用示例
+4. 架构 & 流程
+5. 开发与测试
+6. FAQ / 常见问题
 
-## English
+---
+## 1. 快速开始
+```bash
+# 克隆并安装依赖
+git clone https://github.com/very99/cisco-mcp.git
+cd cisco-mcp
+npm install
 
-A comprehensive MCP (Model Context Protocol) server for Cisco device management via SSH/Telnet. Execute commands and manage Cisco routers, switches, and firewalls through AI assistants like Claude and Amazon Q.
+# 创建设备文件（详见下一节）
+cp example.devices.json cisco-devices.json
 
-### ✨ Features
+# 构建
+npm run build
 
-- **🔌 Dual Protocol Support**: Connect via SSH or Telnet
-- **🔄 Persistent Connections**: Maintain long-lived connections for efficient command execution
-- **🎯 Universal Command Execution**: Execute any Cisco command through a single interface
-- **🔐 Mode Management**: Automatic switching between user, enable, and configuration modes
-- **🌐 Multi-Device Support**: Manage multiple Cisco devices simultaneously
-- **🤖 AI-Friendly**: Natural language command translation through AI assistants
-- **📊 Connection Monitoring**: Track active connections and their status
+# 运行 MCP Server（传入设备文件路径）
+node dist/index.js ./cisco-devices.json
+```
 
-### 🚀 Quick Start
-
-1. **Clone and Install**
-   ```bash
-   git clone https://github.com/very99/cisco-mcp.git
-   cd cisco-mcp
-   npm install
-   ```
-
-2. **Build the Project**
-   ```bash
-   npm run build
-   ```
-
-3. **Configure MCP Client**
-   
-   Add to your MCP configuration (e.g., Claude Desktop):
-   ```json
-   {
-     "mcpServers": {
-       "cisco-mcp": {
-         "command": "node",
-         "args": ["/path/to/cisco-mcp/dist/index.js"]
-       }
-     }
-   }
-   ```
-
-### 🛠 Available Tools
-
-#### `connect_cisco_device`
-Establish a connection to a Cisco device.
-
-**Parameters:**
-- `host` (required): IP address or hostname
-- `username` (required): Authentication username
-- `password` (required): Authentication password
-- `protocol` (optional): "ssh" or "telnet" (default: "ssh")
-- `port` (optional): Custom port number
-- `enable_password` (optional): Enable password for privileged mode
-
-**Example:**
+在 AI 助手（或任何 MCP Client）中将服务器注册为：
 ```json
 {
-  "host": "192.168.1.1",
-  "username": "admin",
-  "password": "password123",
-  "protocol": "ssh",
-  "enable_password": "enable123"
+  "mcpServers": {
+    "cisco-mcp": {
+      "command": "node",
+      "args": ["/absolute/path/to/dist/index.js", "/absolute/path/to/cisco-devices.json"]
+    }
+  }
 }
 ```
 
-#### `execute_cisco_command`
-Execute a command on a connected Cisco device.
-
-**Parameters:**
-- `host` (required): Target device IP/hostname
-- `command` (required): Cisco command to execute
-- `mode` (optional): "user", "enable", or "config" (default: "user")
-
-**Example:**
+---
+## 2. 设备配置文件格式
+`cisco-devices.json` 示例：
 ```json
-{
-  "host": "192.168.1.1",
-  "command": "show version",
-  "mode": "user"
-}
+[
+  {
+    "alias": "office-cisco-3750",
+    "host": "192.168.4.14",
+    "username": "cisco",
+    "password": "********",
+    "protocol": "telnet"      // 可选："ssh" | "telnet"，默认 ssh
+    // "port": 23             // 可选
+    // "enablePassword": "***" // 可选
+  }
+]
 ```
-
-#### `disconnect_cisco_device`
-Disconnect from a Cisco device.
-
-**Parameters:**
-- `host` (required): Device IP/hostname to disconnect
-
-#### `list_connections`
-List all active connections.
-
-### 💡 Usage Examples
-
-#### Basic Device Information
-```
-AI: "Connect to router 192.168.1.1 and show me the device information"
-```
-The AI will:
-1. Use `connect_cisco_device` to establish connection
-2. Use `execute_cisco_command` with "show version"
-
-#### Interface Configuration
-```
-AI: "Configure interface GigabitEthernet0/1 with IP 10.1.1.1/24"
-```
-The AI will:
-1. Use `execute_cisco_command` with mode "config"
-2. Execute: "interface GigabitEthernet0/1"
-3. Execute: "ip address 10.1.1.1 255.255.255.0"
-
-#### Network Troubleshooting
-```
-AI: "Check the routing table and interface status on the core switch"
-```
-The AI will execute multiple commands:
-- "show ip route"
-- "show ip interface brief"
-- "show interface status"
-
-### 🔧 Supported Cisco Commands
-
-This MCP server supports **all** Cisco IOS commands, including but not limited to:
-
-#### Show Commands
-- `show version` - Device information
-- `show running-config` - Current configuration
-- `show ip interface brief` - Interface summary
-- `show ip route` - Routing table
-- `show vlan brief` - VLAN information
-- `show interface status` - Interface status
-- `show cdp neighbors` - CDP neighbors
-- `show mac address-table` - MAC address table
-
-#### Configuration Commands
-- `configure terminal` - Enter configuration mode
-- `interface <interface>` - Configure interface
-- `ip address <ip> <mask>` - Set IP address
-- `no shutdown` - Enable interface
-- `vlan <vlan-id>` - Create/configure VLAN
-- `router ospf <process-id>` - Configure OSPF
-
-#### Diagnostic Commands
-- `ping <destination>` - Test connectivity
-- `traceroute <destination>` - Trace route
-- `show tech-support` - Technical support information
-
-### 🔒 Security Notes
-
-- This tool is designed for network automation and management
-- Credentials are passed per connection and not stored
-- Use appropriate network security practices
-- Consider using SSH keys for enhanced security (future enhancement)
-
-### 🏗 Architecture
-
-```
-AI Assistant (Claude/Amazon Q)
-    ↓ Natural Language
-MCP Client
-    ↓ Tool Calls
-Cisco MCP Server
-    ↓ SSH/Telnet
-Cisco Devices (Routers/Switches/Firewalls)
-```
-
-### 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+• **alias** ：必须唯一，后续所有工具均以此为设备标识。  
+• **enablePassword** ：若需要进入特权模式，可填写；否则留空。
 
 ---
+## 3. 工具一览 & 调用示例
 
-## 中文
+| 名称 | 作用 | 关键字段 |
+| ---- | ---- | -------- |
+| `list_available_devices` | 列出所有已配置的设备（alias/host/protocol）。<br>不清楚 alias 时先调用它。 | 无参数 |
+| `connect_cisco_device` | 主动建立长连接；通常不必显式调用，`execute_cisco_command` 会自动建连。| `deviceAlias` |
+| `execute_cisco_command` | 执行任意 Cisco 命令（user/enable/config）。若未连接会自动建连。 | `deviceAlias`, `command`, `mode?` |
+| `disconnect_cisco_device` | 断开指定设备连接，释放资源。 | `deviceAlias` |
+| `list_connections` | 查看当前活动连接及时间戳。 | 无参数 |
 
-一个全面的MCP（模型上下文协议）服务器，用于通过SSH/Telnet管理Cisco设备。通过Claude和Amazon Q等AI助手执行命令并管理Cisco路由器、交换机和防火墙。
+### 调用示例（伪代码）
+```jsonc
+// 1. 如果不知道 alias，可先查询
+{"tool": "list_available_devices", "arguments": {} }
+// => [{"alias": "office-cisco-3750", "host": "192.168.4.14", "protocol": "telnet"}]
 
-### ✨ 功能特性
-
-- **🔌 双协议支持**: 支持SSH或Telnet连接
-- **🔄 持久连接**: 维护长连接以实现高效的命令执行
-- **🎯 通用命令执行**: 通过单一接口执行任何Cisco命令
-- **🔐 模式管理**: 自动在用户、特权和配置模式之间切换
-- **🌐 多设备支持**: 同时管理多个Cisco设备
-- **🤖 AI友好**: 通过AI助手进行自然语言命令转换
-- **📊 连接监控**: 跟踪活动连接及其状态
-
-### 🚀 快速开始
-
-1. **克隆并安装**
-   ```bash
-   git clone https://github.com/very99/cisco-mcp.git
-   cd cisco-mcp
-   npm install
-   ```
-
-2. **构建项目**
-   ```bash
-   npm run build
-   ```
-
-3. **配置MCP客户端**
-   
-   添加到您的MCP配置中（例如Claude Desktop）：
-   ```json
-   {
-     "mcpServers": {
-       "cisco-mcp": {
-         "command": "node",
-         "args": ["/path/to/cisco-mcp/dist/index.js"]
-       }
-     }
-   }
-   ```
-
-### 🛠 可用工具
-
-#### `connect_cisco_device`
-建立到Cisco设备的连接。
-
-#### `execute_cisco_command`
-在已连接的Cisco设备上执行命令。
-
-#### `disconnect_cisco_device`
-断开与Cisco设备的连接。
-
-#### `list_connections`
-列出所有活动连接。
-
-### 💡 使用示例
-
-#### 基本设备信息
-```
-AI: "连接到路由器192.168.1.1并显示设备信息"
+// 2. 直接执行命令（自动建连）
+{
+  "tool": "execute_cisco_command",
+  "arguments": {
+    "deviceAlias": "office-cisco-3750",
+    "command": "show version",
+    "mode": "user"
+  }
+}
+// 返回 IOS 版本信息
 ```
 
-#### 接口配置
+---
+## 4. 架构 & 流程
+```mermaid
+sequenceDiagram
+    participant AI as AI Assistant
+    participant MCP as MCP Client
+    participant S as Cisco MCP Server
+    participant R as Cisco Router/Switch
+
+    AI->>MCP: tool call (execute_cisco_command)
+    MCP->>S: MCP JSON-RPC (stdio)
+    alt 未连接
+        S->>R: Telnet/SSH connect
+        S-->>S: terminal length 0
+    end
+    S->>R: send command
+    R-->>S: CLI output
+    S-->>MCP: result text
+    MCP-->>AI: 回复用户
 ```
-AI: "配置接口GigabitEthernet0/1的IP为10.1.1.1/24"
+
+---
+## 5. 开发与测试
+
+```bash
+# 本地热重载
+npm run dev /path/to/cisco-devices.json
+
+# 单元 + 集成测试
+npm test            # 默认测试 office-cisco-3750 & show version
+```
+测试脚本位于 `scripts/test-office.ts`，可使用：
+```bash
+npx tsx scripts/test-office.ts ./cisco-devices.json office-cisco-3750
 ```
 
-#### 网络故障排除
-```
-AI: "检查核心交换机的路由表和接口状态"
-```
+---
+## 6. FAQ / 常见问题
 
-### 🔧 支持的Cisco命令
+**Q: 如果 execute_cisco_command 提示 alias 未找到？**  
+A: 先确认设备已写入配置文件，再调用 `list_available_devices` 查看是否加载成功。
 
-此MCP服务器支持**所有**Cisco IOS命令，包括但不限于：
+**Q: 需要手动 connect 吗？**  
+A: 一般不需要。服务器会在首次执行命令时自动建连。
 
-- 显示命令（show commands）
-- 配置命令（configuration commands）
-- 诊断命令（diagnostic commands）
+**Q: Telnet 输出被 `--More--` 卡住？**  
+A: 服务器会在连接后发送 `terminal length 0` 关闭分页；若仍遇到问题请确保设备支持该命令。
 
-### 📝 许可证
+**Q: 如何安全保存密码？**  
+A: 目前示例使用明文 JSON；生产可将密码加密或改用环境变量，并在 `config-loader` 中解密读取。
 
-本项目采用MIT许可证 - 详见[LICENSE](LICENSE)文件。
+---
+**MIT License**  | © 2024 very99

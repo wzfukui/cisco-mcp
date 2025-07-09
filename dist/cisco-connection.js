@@ -4,283 +4,186 @@ export class CiscoConnectionManager {
     constructor() {
         this.connections = new Map();
     }
-    async connect(config) {
-        const { host, username, password, protocol, port, enablePassword } = config;
-        try {
-            // Check if already connected
-            if (this.connections.has(host)) {
-                const existing = this.connections.get(host);
-                if (existing.connected) {
-                    return {
-                        success: true,
-                        message: `Already connected to ${host} via ${protocol.toUpperCase()}`,
-                        host,
-                    };
-                }
-            }
-            if (protocol === 'ssh') {
-                return await this.connectSSH(config);
-            }
-            else {
-                return await this.connectTelnet(config);
-            }
+    /**
+     * 建立到指定设备的连接，键值使用 alias。
+     */
+    async connect(device) {
+        const { alias, protocol = 'ssh' } = device;
+        // 若已有连接且未断开，直接返回成功
+        const existing = this.connections.get(alias);
+        if (existing && existing.connected) {
+            return { success: true, message: `Already connected to ${alias}`, alias };
         }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            return {
-                success: false,
-                message: `Failed to connect to ${host}: ${errorMessage}`,
-                host,
-            };
-        }
+        return protocol === 'ssh' ? this.connectSSH(device) : this.connectTelnet(device);
     }
-    async connectSSH(config) {
-        const { host, username, password, port = 22 } = config;
+    connectSSH(device) {
+        const { alias, host, username, password, port = 22 } = device;
         return new Promise((resolve) => {
             const client = new SSHClient();
             client.on('ready', () => {
                 client.shell((err, stream) => {
                     if (err) {
-                        resolve({
-                            success: false,
-                            message: `Failed to open shell: ${err.message}`,
-                            host,
-                        });
+                        resolve({ success: false, message: `Shell error: ${err.message}`, alias });
                         return;
                     }
-                    const connection = {
-                        config,
+                    const conn = {
+                        config: device,
                         client,
                         shell: stream,
+                        protocol: 'ssh',
                         connected: true,
                         connectedAt: new Date(),
                         lastActivity: new Date(),
                         currentMode: 'user',
                     };
-                    this.connections.set(host, connection);
-                    // Set up stream handlers
-                    stream.on('close', () => {
-                        this.connections.delete(host);
-                    });
-                    resolve({
-                        success: true,
-                        message: `Successfully connected to ${host} via SSH`,
-                        host,
-                    });
+                    this.connections.set(alias, conn);
+                    // 关闭分页，避免 --More-- 停顿
+                    this.executeSSHCommand(conn, 'terminal length 0').catch(() => { });
+                    stream.on('close', () => this.connections.delete(alias));
+                    resolve({ success: true, message: `SSH connected to ${alias}`, alias });
                 });
             });
             client.on('error', (err) => {
-                resolve({
-                    success: false,
-                    message: `SSH connection error: ${err.message}`,
-                    host,
-                });
+                resolve({ success: false, message: `SSH error: ${err.message}`, alias });
             });
-            client.connect({
-                host,
-                port,
-                username,
-                password,
-                readyTimeout: 30000,
-            });
+            client.connect({ host, port, username, password, readyTimeout: 30000 });
         });
     }
-    async connectTelnet(config) {
-        const { host, username, password, port = 23 } = config;
+    async connectTelnet(device) {
+        const { alias, host, username, password, port = 23 } = device;
         try {
             const client = new Telnet();
             await client.connect({
                 host,
                 port,
-                shellPrompt: /[$%#>]\s*$/,
+                shellPrompt: /[>#]\s*$/,
                 timeout: 30000,
-                loginPrompt: /login[: ]*$/i,
+                loginPrompt: /(login|username)[: ]*$/i,
                 passwordPrompt: /password[: ]*$/i,
                 username,
                 password,
             });
-            const connection = {
-                config,
+            const conn = {
+                config: device,
                 client,
+                protocol: 'telnet',
                 connected: true,
                 connectedAt: new Date(),
                 lastActivity: new Date(),
                 currentMode: 'user',
             };
-            this.connections.set(host, connection);
-            return {
-                success: true,
-                message: `Successfully connected to ${host} via Telnet`,
-                host,
-            };
+            this.connections.set(alias, conn);
+            // 关闭分页
+            try {
+                await client.exec('terminal length 0', { timeout: 30000 });
+            }
+            catch { }
+            return { success: true, message: `Telnet connected to ${alias}`, alias };
         }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            return {
-                success: false,
-                message: `Telnet connection error: ${errorMessage}`,
-                host,
-            };
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return { success: false, message: `Telnet error: ${msg}`, alias };
         }
     }
-    async executeCommand(host, command, mode = 'user') {
-        const connection = this.connections.get(host);
+    async executeCommand(alias, command, mode = 'user') {
+        const connection = this.connections.get(alias);
         if (!connection || !connection.connected) {
-            throw new Error(`No active connection to ${host}. Please connect first.`);
+            throw new Error(`No active connection for alias ${alias}`);
         }
         connection.lastActivity = new Date();
-        try {
-            // Handle mode switching
-            await this.switchMode(connection, mode);
-            if (connection.config.protocol === 'ssh') {
-                return await this.executeSSHCommand(connection, command);
-            }
-            else {
-                return await this.executeTelnetCommand(connection, command);
-            }
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            throw new Error(`Command execution failed: ${errorMessage}`);
-        }
+        await this.switchMode(connection, mode);
+        return connection.protocol === 'ssh'
+            ? this.executeSSHCommand(connection, command)
+            : this.executeTelnetCommand(connection, command);
     }
-    async switchMode(connection, targetMode) {
-        if (connection.currentMode === targetMode) {
+    async switchMode(connection, target) {
+        if (connection.currentMode === target)
             return;
-        }
-        const { enablePassword } = connection.config;
-        if (targetMode === 'enable' && connection.currentMode === 'user') {
-            if (!enablePassword) {
-                throw new Error('Enable password required for privileged mode');
-            }
-            if (connection.config.protocol === 'ssh') {
-                await this.executeSSHCommand(connection, 'enable');
-                await this.executeSSHCommand(connection, enablePassword);
-            }
-            else {
-                await this.executeTelnetCommand(connection, 'enable');
-                await this.executeTelnetCommand(connection, enablePassword);
-            }
+        const enablePass = connection.config.enablePassword;
+        const send = (cmd) => connection.protocol === 'ssh'
+            ? this.executeSSHCommand(connection, cmd)
+            : this.executeTelnetCommand(connection, cmd);
+        if (target === 'enable' && connection.currentMode === 'user') {
+            if (!enablePass)
+                throw new Error('Enable password required');
+            await send('enable');
+            await send(enablePass);
             connection.currentMode = 'enable';
         }
-        else if (targetMode === 'config' && connection.currentMode !== 'config') {
-            // First ensure we're in enable mode
+        else if (target === 'config') {
             if (connection.currentMode === 'user') {
                 await this.switchMode(connection, 'enable');
             }
-            if (connection.config.protocol === 'ssh') {
-                await this.executeSSHCommand(connection, 'configure terminal');
-            }
-            else {
-                await this.executeTelnetCommand(connection, 'configure terminal');
-            }
+            await send('configure terminal');
             connection.currentMode = 'config';
         }
-        else if (targetMode === 'user' && connection.currentMode !== 'user') {
-            // Exit to user mode
-            if (connection.config.protocol === 'ssh') {
-                if (connection.currentMode === 'config') {
-                    await this.executeSSHCommand(connection, 'exit');
-                }
-                await this.executeSSHCommand(connection, 'exit');
-            }
-            else {
-                if (connection.currentMode === 'config') {
-                    await this.executeTelnetCommand(connection, 'exit');
-                }
-                await this.executeTelnetCommand(connection, 'exit');
-            }
+        else if (target === 'user') {
+            if (connection.currentMode === 'config')
+                await send('exit');
+            await send('exit');
             connection.currentMode = 'user';
         }
     }
-    async executeSSHCommand(connection, command) {
-        return new Promise((resolve, reject) => {
-            const stream = connection.shell;
-            let output = '';
-            let timeoutId;
-            const cleanup = () => {
-                if (timeoutId)
-                    clearTimeout(timeoutId);
-                stream.removeAllListeners('data');
-            };
+    executeSSHCommand(conn, cmd) {
+        return new Promise((resolve) => {
+            let out = '';
+            const stream = conn.shell;
+            const cleanup = () => stream.removeAllListeners('data');
+            let timer = setTimeout(() => {
+                cleanup();
+                resolve(out || 'timeout');
+            }, 30000);
             stream.on('data', (data) => {
                 const chunk = data.toString();
-                output += chunk;
-                // Check for common Cisco prompts to determine command completion
-                if (chunk.match(/[>#$%]\s*$/) || chunk.includes('--More--')) {
+                out += chunk;
+                if (chunk.match(/[>#]\s*$/) || chunk.includes('--More--')) {
+                    clearTimeout(timer);
                     cleanup();
-                    resolve(output);
+                    resolve(out);
                 }
             });
-            // Set timeout for command execution
-            timeoutId = setTimeout(() => {
-                cleanup();
-                resolve(output || 'Command timeout - no response received');
-            }, 30000);
-            // Send command
-            stream.write(command + '\n');
+            stream.write(cmd + '\n');
         });
     }
-    async executeTelnetCommand(connection, command) {
+    async executeTelnetCommand(conn, cmd) {
         try {
-            const client = connection.client;
-            const result = await client.exec(command, {
-                timeout: 30000,
-            });
-            return result;
+            return await conn.client.exec(cmd, { timeout: 60000 });
         }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            return `Command execution error: ${errorMessage}`;
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return `Telnet exec error: ${msg}`;
         }
     }
-    async disconnect(host) {
-        const connection = this.connections.get(host);
-        if (!connection) {
-            return {
-                success: false,
-                message: `No connection found for ${host}`,
-                host,
-            };
-        }
+    async disconnect(alias) {
+        const conn = this.connections.get(alias);
+        if (!conn)
+            return { success: false, message: `No connection for ${alias}`, alias };
         try {
-            if (connection.config.protocol === 'ssh') {
-                const client = connection.client;
-                client.end();
+            if (conn.protocol === 'ssh') {
+                conn.client.end();
             }
             else {
-                const client = connection.client;
-                await client.end();
+                await conn.client.end();
             }
-            this.connections.delete(host);
-            return {
-                success: true,
-                message: `Successfully disconnected from ${host}`,
-                host,
-            };
+            this.connections.delete(alias);
+            return { success: true, message: `Disconnected ${alias}`, alias };
         }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            return {
-                success: false,
-                message: `Error disconnecting from ${host}: ${errorMessage}`,
-                host,
-            };
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return { success: false, message: msg, alias };
         }
     }
     listConnections() {
-        return Array.from(this.connections.entries()).map(([host, connection]) => ({
-            host,
-            protocol: connection.config.protocol,
-            connected: connection.connected,
-            connectedAt: connection.connectedAt,
-            lastActivity: connection.lastActivity,
+        return Array.from(this.connections.entries()).map(([alias, c]) => ({
+            alias,
+            host: c.config.host,
+            protocol: c.protocol,
+            connectedAt: c.connectedAt,
+            lastActivity: c.lastActivity,
         }));
     }
-    // Cleanup method to close all connections
     async cleanup() {
-        const hosts = Array.from(this.connections.keys());
-        await Promise.all(hosts.map(host => this.disconnect(host)));
+        await Promise.all(Array.from(this.connections.keys()).map(a => this.disconnect(a)));
     }
 }
 //# sourceMappingURL=cisco-connection.js.map

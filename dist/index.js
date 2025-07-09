@@ -1,187 +1,140 @@
-#!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { loadDeviceConfig } from './config-loader.js';
 import { CiscoConnectionManager } from './cisco-connection.js';
-const server = new Server({
-    name: 'cisco-mcp',
-    version: '1.0.0',
-});
-// Connection manager instance
+// 加载设备配置
+const configFilePath = process.argv[2];
+const deviceConfigMap = await loadDeviceConfig(configFilePath);
+console.error(`Cisco MCP: loaded ${deviceConfigMap.size} devices`);
 const connectionManager = new CiscoConnectionManager();
-// List available tools
+const server = new Server({ name: 'cisco-mcp', version: '2.0.0' });
+// 返回工具列表
 server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
         tools: [
             {
+                name: 'list_available_devices',
+                description: 'List all devices defined in the configuration file passed when starting the server.\nCall this first if you are unsure which deviceAlias to use.',
+                inputSchema: { type: 'object', properties: {} },
+            },
+            {
                 name: 'connect_cisco_device',
-                description: 'Connect to a Cisco device via SSH or Telnet. Establishes a persistent connection for command execution.',
+                description: 'Establish a persistent connection to a Cisco device.\nNormally you do NOT need to call this manually: execute_cisco_command will auto-connect if necessary.\nStill useful when you want to keep the session warm.',
                 inputSchema: {
                     type: 'object',
                     properties: {
-                        host: {
-                            type: 'string',
-                            description: 'IP address or hostname of the Cisco device',
-                        },
-                        username: {
-                            type: 'string',
-                            description: 'Username for authentication',
-                        },
-                        password: {
-                            type: 'string',
-                            description: 'Password for authentication',
-                        },
-                        protocol: {
-                            type: 'string',
-                            enum: ['ssh', 'telnet'],
-                            description: 'Connection protocol (ssh or telnet)',
-                            default: 'ssh',
-                        },
-                        port: {
-                            type: 'number',
-                            description: 'Port number (default: 22 for SSH, 23 for Telnet)',
-                        },
-                        enable_password: {
-                            type: 'string',
-                            description: 'Enable password for privileged mode (optional)',
-                        },
+                        deviceAlias: { type: 'string', description: 'Alias of device to connect.' },
                     },
-                    required: ['host', 'username', 'password'],
+                    required: ['deviceAlias'],
                 },
             },
             {
                 name: 'execute_cisco_command',
-                description: 'Execute a command on a connected Cisco device. The device must be connected first using connect_cisco_device.',
+                description: 'Execute any Cisco IOS command.\nIf the device is not yet connected, the server will automatically connect using the saved credentials.',
                 inputSchema: {
                     type: 'object',
                     properties: {
-                        host: {
-                            type: 'string',
-                            description: 'IP address or hostname of the connected Cisco device',
-                        },
+                        deviceAlias: { type: 'string', description: 'Alias of target device' },
                         command: {
                             type: 'string',
-                            description: 'Cisco command to execute (e.g., "show version", "show ip interface brief")',
+                            description: 'Cisco command to execute, e.g., "show version"',
                         },
                         mode: {
                             type: 'string',
                             enum: ['user', 'enable', 'config'],
-                            description: 'Execution mode: user (default), enable (privileged), or config (configuration)',
+                            description: 'Execution mode',
                             default: 'user',
                         },
                     },
-                    required: ['host', 'command'],
+                    required: ['deviceAlias', 'command'],
                 },
             },
             {
                 name: 'disconnect_cisco_device',
-                description: 'Disconnect from a Cisco device and clean up the connection.',
+                description: 'Close the persistent connection for the given deviceAlias and free resources.',
                 inputSchema: {
                     type: 'object',
                     properties: {
-                        host: {
-                            type: 'string',
-                            description: 'IP address or hostname of the Cisco device to disconnect',
-                        },
+                        deviceAlias: { type: 'string', description: 'Alias to disconnect' },
                     },
-                    required: ['host'],
+                    required: ['deviceAlias'],
                 },
             },
             {
                 name: 'list_connections',
-                description: 'List all active Cisco device connections.',
-                inputSchema: {
-                    type: 'object',
-                    properties: {},
-                },
+                description: 'List current active connections',
+                inputSchema: { type: 'object', properties: {} },
             },
         ],
     };
 });
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+// 处理工具调用
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const { name, arguments: args } = req.params;
     try {
         switch (name) {
+            case 'list_available_devices': {
+                const list = Array.from(deviceConfigMap.values()).map((d) => ({
+                    alias: d.alias,
+                    host: d.host,
+                    protocol: d.protocol ?? 'ssh',
+                }));
+                return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+            }
             case 'connect_cisco_device': {
-                const { host, username, password, protocol = 'ssh', port, enable_password } = args;
-                const result = await connectionManager.connect({
-                    host,
-                    username,
-                    password,
-                    protocol,
-                    port,
-                    enablePassword: enable_password,
-                });
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: JSON.stringify(result, null, 2),
-                        },
-                    ],
-                };
+                const { deviceAlias } = args;
+                const dev = deviceConfigMap.get(deviceAlias);
+                if (!dev)
+                    throw new Error(`Unknown deviceAlias ${deviceAlias}`);
+                const res = await connectionManager.connect(dev);
+                return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
             }
             case 'execute_cisco_command': {
-                const { host, command, mode = 'user' } = args;
-                const result = await connectionManager.executeCommand(host, command, mode);
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: result,
-                        },
-                    ],
-                };
+                const { deviceAlias, command, mode = 'user' } = args;
+                let output;
+                try {
+                    output = await connectionManager.executeCommand(deviceAlias, command, mode);
+                }
+                catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (msg.startsWith('No active connection')) {
+                        const dev = deviceConfigMap.get(deviceAlias);
+                        if (!dev)
+                            throw new Error(`${msg} and deviceAlias not found in config`);
+                        const connRes = await connectionManager.connect(dev);
+                        if (!connRes.success)
+                            throw new Error(`Auto-connect failed: ${connRes.message}`);
+                        output = await connectionManager.executeCommand(deviceAlias, command, mode);
+                    }
+                    else {
+                        throw err;
+                    }
+                }
+                return { content: [{ type: 'text', text: output }] };
             }
             case 'disconnect_cisco_device': {
-                const { host } = args;
-                const result = await connectionManager.disconnect(host);
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: JSON.stringify(result, null, 2),
-                        },
-                    ],
-                };
+                const { deviceAlias } = args;
+                const res = await connectionManager.disconnect(deviceAlias);
+                return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
             }
             case 'list_connections': {
-                const connections = connectionManager.listConnections();
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: JSON.stringify(connections, null, 2),
-                        },
-                    ],
-                };
+                const list = connectionManager.listConnections();
+                return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
             }
             default:
-                throw new Error(`Unknown tool: ${name}`);
+                throw new Error(`Unknown tool ${name}`);
         }
     }
-    catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return {
-            content: [
-                {
-                    type: 'text',
-                    text: `Error: ${errorMessage}`,
-                },
-            ],
-            isError: true,
-        };
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true };
     }
 });
-// Start the server
-async function main() {
+// 启动 MCP Server
+(async () => {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('Cisco MCP Server running on stdio');
-}
-main().catch((error) => {
-    console.error('Server error:', error);
-    process.exit(1);
-});
+    console.error('Cisco MCP Server (v2) listening on stdio');
+})();
 //# sourceMappingURL=index.js.map
