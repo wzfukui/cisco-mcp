@@ -104,10 +104,12 @@ export class CiscoConnectionManager {
             ? this.executeSSHCommand(connection, cmd)
             : this.executeTelnetCommand(connection, cmd);
         if (target === 'enable' && connection.currentMode === 'user') {
-            if (!enablePass)
-                throw new Error('Enable password required');
+            // 当设备未设置 enable password 时，直接敲回车即可进入特权模式。
             await send('enable');
-            await send(enablePass);
+            if (enablePass !== undefined) {
+                // 若配置了 enablePassword（即使为空字符串，也发送一次回车）
+                await send(enablePass);
+            }
             connection.currentMode = 'enable';
         }
         else if (target === 'config') {
